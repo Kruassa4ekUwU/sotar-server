@@ -296,7 +296,7 @@ app.get('/developers/:id', (req, res) => {
 
 // ─── START ────────────────────────────────────────────────
 initDB().then(() => {
-  app.listen(PORT, () => {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Sotar Play API running on port ${PORT}`);
   });
 });
