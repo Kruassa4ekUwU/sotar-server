@@ -56,6 +56,7 @@ async function initDB() {
       email TEXT UNIQUE NOT NULL,
       bio TEXT,
       avatar_color TEXT DEFAULT '#FF7214',
+      verified INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -77,6 +78,8 @@ async function initDB() {
       rating_count INTEGER DEFAULT 0,
       apk_filename TEXT,
       apk_url TEXT,
+      screenshots TEXT DEFAULT '[]',
+      banner_url TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (developer_id) REFERENCES developers(id)
     )
@@ -90,8 +93,56 @@ async function initDB() {
       reviewer_email TEXT,
       text TEXT,
       rating INTEGER DEFAULT 5,
+      likes INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (app_id) REFERENCES apps(id)
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS bookmarks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      app_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS download_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      app_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      developer_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS changelogs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_id INTEGER NOT NULL,
+      version TEXT NOT NULL,
+      changes TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS review_replies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      review_id INTEGER NOT NULL,
+      reviewer_name TEXT NOT NULL,
+      text TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
@@ -299,4 +350,186 @@ initDB().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Sotar Play API running on port ${PORT}`);
   });
+});
+
+// ─── SCREENSHOTS ──────────────────────────────────────────
+app.post('/apps/:id/screenshots', upload.array('screenshots', 5), (req, res) => {
+  const app = queryOne('SELECT * FROM apps WHERE id = ?', [req.params.id]);
+  if (!app) return res.status(404).json({ error: 'App not found' });
+
+  const urls = (req.files || []).map(f => `/apk/${f.filename}`);
+  const existing = app.screenshots ? JSON.parse(app.screenshots) : [];
+  const all = [...existing, ...urls].slice(0, 5);
+  run('UPDATE apps SET screenshots = ? WHERE id = ?', [JSON.stringify(all), app.id]);
+  res.json({ screenshots: all });
+});
+
+app.get('/apps/:id/screenshots', (req, res) => {
+  const app = queryOne('SELECT * FROM apps WHERE id = ?', [req.params.id]);
+  if (!app) return res.status(404).json({ error: 'App not found' });
+  const screenshots = app.screenshots ? JSON.parse(app.screenshots) : [];
+  res.json({ screenshots });
+});
+
+// ─── LIKES on reviews ─────────────────────────────────────
+app.post('/reviews/:id/like', (req, res) => {
+  const review = queryOne('SELECT * FROM reviews WHERE id = ?', [req.params.id]);
+  if (!review) return res.status(404).json({ error: 'Review not found' });
+  run('UPDATE reviews SET likes = likes + 1 WHERE id = ?', [req.params.id]);
+  res.json({ likes: (review.likes || 0) + 1 });
+});
+
+// ─── BOOKMARKS ────────────────────────────────────────────
+app.post('/bookmarks', (req, res) => {
+  const { user_email, app_id } = req.body;
+  if (!user_email || !app_id) return res.status(400).json({ error: 'user_email и app_id обязательны' });
+  const exists = queryOne('SELECT * FROM bookmarks WHERE user_email = ? AND app_id = ?', [user_email, app_id]);
+  if (exists) {
+    run('DELETE FROM bookmarks WHERE user_email = ? AND app_id = ?', [user_email, app_id]);
+    res.json({ bookmarked: false });
+  } else {
+    run('INSERT INTO bookmarks (user_email, app_id) VALUES (?, ?)', [user_email, app_id]);
+    res.json({ bookmarked: true });
+  }
+});
+
+app.get('/bookmarks/:email', (req, res) => {
+  const rows = queryAll(
+    'SELECT apps.* FROM apps JOIN bookmarks ON apps.id = bookmarks.app_id WHERE bookmarks.user_email = ?',
+    [req.params.email]
+  );
+  res.json({ apps: rows });
+});
+
+// ─── TOP OF THE WEEK ──────────────────────────────────────
+app.get('/top', (req, res) => {
+  const apps = queryAll(
+    'SELECT * FROM apps ORDER BY download_count DESC LIMIT 10'
+  );
+  res.json({ apps });
+});
+
+// ─── DOWNLOAD HISTORY ─────────────────────────────────────
+app.post('/history', (req, res) => {
+  const { user_email, app_id } = req.body;
+  if (!user_email || !app_id) return res.status(400).json({ error: 'user_email и app_id обязательны' });
+  const exists = queryOne('SELECT * FROM download_history WHERE user_email = ? AND app_id = ?', [user_email, app_id]);
+  if (!exists) {
+    run('INSERT INTO download_history (user_email, app_id) VALUES (?, ?)', [user_email, app_id]);
+  }
+  res.json({ success: true });
+});
+
+app.get('/history/:email', (req, res) => {
+  const rows = queryAll(
+    'SELECT apps.* FROM apps JOIN download_history ON apps.id = download_history.app_id WHERE download_history.user_email = ? ORDER BY download_history.id DESC',
+    [req.params.email]
+  );
+  res.json({ apps: rows });
+});
+
+// ─── SUBSCRIPTIONS ────────────────────────────────────────
+app.post('/subscriptions', (req, res) => {
+  const { user_email, developer_id } = req.body;
+  if (!user_email || !developer_id) return res.status(400).json({ error: 'Обязательные поля' });
+  const exists = queryOne('SELECT * FROM subscriptions WHERE user_email = ? AND developer_id = ?', [user_email, developer_id]);
+  if (exists) {
+    run('DELETE FROM subscriptions WHERE user_email = ? AND developer_id = ?', [user_email, developer_id]);
+    res.json({ subscribed: false });
+  } else {
+    run('INSERT INTO subscriptions (user_email, developer_id) VALUES (?, ?)', [user_email, developer_id]);
+    res.json({ subscribed: true });
+  }
+});
+
+// ─── DEVELOPER STATS ──────────────────────────────────────
+app.get('/developers/:id/stats', (req, res) => {
+  const apps = queryAll('SELECT * FROM apps WHERE developer_id = ?', [req.params.id]);
+  const totalDownloads = apps.reduce((sum, a) => sum + (a.download_count || 0), 0);
+  const totalRatings = apps.reduce((sum, a) => sum + (a.rating_count || 0), 0);
+  const avgRating = apps.length > 0
+    ? apps.reduce((sum, a) => sum + (a.rating || 0), 0) / apps.length
+    : 0;
+  const subscribers = queryOne('SELECT COUNT(*) as cnt FROM subscriptions WHERE developer_id = ?', [req.params.id]);
+  res.json({
+    total_apps: apps.length,
+    total_downloads: totalDownloads,
+    total_ratings: totalRatings,
+    avg_rating: parseFloat(avgRating.toFixed(1)),
+    subscribers: subscribers?.cnt || 0
+  });
+});
+
+// ─── VERIFIED DEVELOPERS ──────────────────────────────────
+app.post('/developers/:id/verify', (req, res) => {
+  run('UPDATE developers SET verified = 1 WHERE id = ?', [req.params.id]);
+  res.json({ verified: true });
+});
+
+// ─── SIMILAR APPS ─────────────────────────────────────────
+app.get('/apps/:id/similar', (req, res) => {
+  const app = queryOne('SELECT * FROM apps WHERE id = ?', [req.params.id]);
+  if (!app) return res.status(404).json({ error: 'Not found' });
+  const similar = queryAll(
+    'SELECT * FROM apps WHERE category = ? AND id != ? ORDER BY download_count DESC LIMIT 5',
+    [app.category, app.id]
+  );
+  res.json({ apps: similar });
+});
+
+// ─── BANNER ───────────────────────────────────────────────
+app.post('/apps/:id/banner', upload.single('banner'), (req, res) => {
+  const app = queryOne('SELECT * FROM apps WHERE id = ?', [req.params.id]);
+  if (!app) return res.status(404).json({ error: 'Not found' });
+  if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
+  const bannerUrl = `/apk/${req.file.filename}`;
+  run('UPDATE apps SET banner_url = ? WHERE id = ?', [bannerUrl, app.id]);
+  res.json({ banner_url: bannerUrl });
+});
+
+// ─── RECOMMENDATIONS ──────────────────────────────────────
+app.get('/recommendations/:email', (req, res) => {
+  const history = queryAll(
+    'SELECT apps.category FROM apps JOIN download_history ON apps.id = download_history.app_id WHERE download_history.user_email = ?',
+    [req.params.email]
+  );
+  if (history.length === 0) {
+    const apps = queryAll('SELECT * FROM apps ORDER BY download_count DESC LIMIT 10');
+    return res.json({ apps });
+  }
+  const categories = [...new Set(history.map(r => r.category))];
+  const placeholders = categories.map(() => '?').join(',');
+  const apps = queryAll(
+    `SELECT * FROM apps WHERE category IN (${placeholders}) ORDER BY rating DESC, download_count DESC LIMIT 10`,
+    categories
+  );
+  res.json({ apps });
+});
+
+// ─── CHANGELOG ────────────────────────────────────────────
+app.post('/apps/:id/changelog', (req, res) => {
+  const { version, changes } = req.body;
+  if (!version || !changes) return res.status(400).json({ error: 'version и changes обязательны' });
+  run('INSERT INTO changelogs (app_id, version, changes) VALUES (?, ?, ?)', [req.params.id, version, changes]);
+  res.json({ success: true });
+});
+
+app.get('/apps/:id/changelog', (req, res) => {
+  const rows = queryAll('SELECT * FROM changelogs WHERE app_id = ? ORDER BY id DESC', [req.params.id]);
+  res.json({ changelogs: rows });
+});
+
+// ─── COMMENT REPLIES ──────────────────────────────────────
+app.post('/reviews/:id/reply', (req, res) => {
+  const { reviewer_name, text } = req.body;
+  if (!reviewer_name || !text) return res.status(400).json({ error: 'Обязательные поля' });
+  const review = queryOne('SELECT * FROM reviews WHERE id = ?', [req.params.id]);
+  if (!review) return res.status(404).json({ error: 'Review not found' });
+  run('INSERT INTO review_replies (review_id, reviewer_name, text) VALUES (?, ?, ?)', [req.params.id, reviewer_name, text]);
+  res.json({ success: true });
+});
+
+app.get('/reviews/:id/replies', (req, res) => {
+  const rows = queryAll('SELECT * FROM review_replies WHERE review_id = ? ORDER BY created_at ASC', [req.params.id]);
+  res.json({ replies: rows });
 });
